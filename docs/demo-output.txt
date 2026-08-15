@@ -1,0 +1,16 @@
+== Scan: show the resolved upload surface ==
+Artifact Fence: 1 upload surface(s), 2 finding(s) across 1 workflow(s).
+ARTIFACT test-diagnostics: .github/workflows/ci.yml / test / Upload diagnostics
+  includes: build/.env
+  includes: build/results.txt
+HIGH credential-assignment (build/.env): Artifact file matches a credential-shaped pattern; value is intentionally not shown. [.github/workflows/ci.yml / test / Upload diagnostics]
+HIGH sensitive-filename (build/.env): Artifact includes a filename commonly used for credentials or environment secrets. [.github/workflows/ci.yml / test / Upload diagnostics]
+
+== Check: fail CI on the high-severity upload exposure ==
+Artifact Fence: 1 upload surface(s), 2 finding(s) across 1 workflow(s).
+ARTIFACT test-diagnostics: .github/workflows/ci.yml / test / Upload diagnostics
+  includes: build/.env
+  includes: build/results.txt
+HIGH credential-assignment (build/.env): Artifact file matches a credential-shaped pattern; value is intentionally not shown. [.github/workflows/ci.yml / test / Upload diagnostics]
+HIGH sensitive-filename (build/.env): Artifact includes a filename commonly used for credentials or environment secrets. [.github/workflows/ci.yml / test / Upload diagnostics]
+Expected gate failure: build/** includes build/.env.
