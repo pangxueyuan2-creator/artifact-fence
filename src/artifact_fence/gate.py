@@ -28,8 +28,104 @@ def _relative(root: Path, path: Path) -> str:
     return path.resolve().relative_to(root.resolve()).as_posix()
 
 
+def _inspect_local_composite(
+    root: Path,
+    action_dir: Path,
+    workflow_name: str,
+    job_name: str,
+    step_name: str,
+    uses: str,
+    findings: list[Finding],
+    visited: set[str],
+) -> None:
+    """Recursively inspect a local composite action for artifact uploads.
+
+    Chains of local composite actions (action -> action -> ... -> upload) are
+    traversed with a visited set, so uploads hidden behind any nesting depth
+    still fail the gate closed. Cycles terminate via the visited set.
+    """
+
+    key = str(action_dir)
+    if key in visited:
+        return
+    visited.add(key)
+    if not _is_within(root, action_dir):
+        findings.append(
+            Finding(
+                "unresolved-local-action",
+                "high",
+                "Local action resolves outside the repository; upload surface cannot be established.",
+                workflow_name,
+                job_name,
+                step_name,
+                uses,
+                uses,
+            )
+        )
+        return
+    metadata = next(
+        (candidate for candidate in (action_dir / "action.yml", action_dir / "action.yaml") if candidate.is_file()),
+        None,
+    )
+    if metadata is None:
+        return
+    try:
+        action_document = _read_yaml(metadata)
+    except ValueError:
+        findings.append(
+            Finding(
+                "unresolved-local-action",
+                "high",
+                "Local action metadata cannot be parsed safely; upload surface cannot be established.",
+                workflow_name,
+                job_name,
+                step_name,
+                uses,
+                _relative(root, metadata),
+            )
+        )
+        return
+    runs = action_document.get("runs")
+    if not isinstance(runs, dict) or str(runs.get("using", "")).lower() != "composite":
+        return
+    nested_steps = runs.get("steps")
+    if not isinstance(nested_steps, list):
+        return
+    for nested in nested_steps:
+        if not isinstance(nested, dict):
+            continue
+        nested_uses = str(nested.get("uses", "")).strip()
+        action, _ = _action_ref(nested_uses)
+        if action in {"actions/upload-artifact", "actions/upload-pages-artifact"}:
+            findings.append(
+                Finding(
+                    "local-composite-artifact-upload",
+                    "high",
+                    "A local composite action contains an artifact upload that the direct workflow scanner cannot enumerate; gate fails closed.",
+                    workflow_name,
+                    job_name,
+                    step_name,
+                    uses,
+                    _relative(root, metadata),
+                )
+            )
+            return
+        if nested_uses.startswith("./"):
+            _inspect_local_composite(
+                root,
+                (root / nested_uses).resolve(),
+                workflow_name,
+                job_name,
+                step_name,
+                nested_uses,
+                findings,
+                visited,
+            )
+
+
 def _local_composite_uploads(root: Path, workflows: Iterable[str | Path] | None) -> list[Finding]:
     findings: list[Finding] = []
+    visited: set[str] = set()
     for workflow_path in _workflow_paths(root, workflows):
         document = _read_yaml(workflow_path)
         jobs = document.get("jobs")
@@ -45,68 +141,17 @@ def _local_composite_uploads(root: Path, workflows: Iterable[str | Path] | None)
                 uses = str(raw_step.get("uses", "")).strip()
                 if not uses.startswith("./"):
                     continue
-                action_dir = (root / uses).resolve()
                 step_name = str(raw_step.get("name") or f"step-{index}").strip()
-                if not _is_within(root, action_dir):
-                    findings.append(
-                        Finding(
-                            "unresolved-local-action",
-                            "high",
-                            "Local action resolves outside the repository; upload surface cannot be established.",
-                            workflow_name,
-                            str(job_name),
-                            step_name,
-                            uses,
-                            uses,
-                        )
-                    )
-                    continue
-                metadata = next(
-                    (candidate for candidate in (action_dir / "action.yml", action_dir / "action.yaml") if candidate.is_file()),
-                    None,
+                _inspect_local_composite(
+                    root,
+                    (root / uses).resolve(),
+                    workflow_name,
+                    str(job_name),
+                    step_name,
+                    uses,
+                    findings,
+                    visited,
                 )
-                if metadata is None:
-                    continue
-                try:
-                    action_document = _read_yaml(metadata)
-                except ValueError:
-                    findings.append(
-                        Finding(
-                            "unresolved-local-action",
-                            "high",
-                            "Local action metadata cannot be parsed safely; upload surface cannot be established.",
-                            workflow_name,
-                            str(job_name),
-                            step_name,
-                            uses,
-                            _relative(root, metadata),
-                        )
-                    )
-                    continue
-                runs = action_document.get("runs")
-                if not isinstance(runs, dict) or str(runs.get("using", "")).lower() != "composite":
-                    continue
-                nested_steps = runs.get("steps")
-                if not isinstance(nested_steps, list):
-                    continue
-                for nested in nested_steps:
-                    if not isinstance(nested, dict):
-                        continue
-                    action, _ = _action_ref(str(nested.get("uses", "")))
-                    if action in {"actions/upload-artifact", "actions/upload-pages-artifact"}:
-                        findings.append(
-                            Finding(
-                                "local-composite-artifact-upload",
-                                "high",
-                                "A local composite action contains an artifact upload that the direct workflow scanner cannot enumerate; gate fails closed.",
-                                workflow_name,
-                                str(job_name),
-                                step_name,
-                                uses,
-                                _relative(root, metadata),
-                            )
-                        )
-                        break
     return findings
 
 
@@ -122,6 +167,7 @@ def _reusable_workflow_uploads(
     """
 
     findings: list[Finding] = []
+    visited: set[str] = set()
 
     def inspect_call(workflow_name: str, job_name: str, uses: str, display_name: str) -> None:
         normalized = uses.replace("\\", "/")
@@ -169,7 +215,8 @@ def _reusable_workflow_uploads(
                 for nested_step in nested_steps:
                     if not isinstance(nested_step, dict):
                         continue
-                    action, _ = _action_ref(str(nested_step.get("uses", "")))
+                    nested_uses = str(nested_step.get("uses", "")).strip()
+                    action, _ = _action_ref(nested_uses)
                     if action in {"actions/upload-artifact", "actions/upload-pages-artifact"}:
                         findings.append(
                             Finding(
@@ -184,6 +231,17 @@ def _reusable_workflow_uploads(
                             )
                         )
                         return
+                    if nested_uses.startswith("./"):
+                        _inspect_local_composite(
+                            root,
+                            (root / nested_uses).resolve(),
+                            workflow_name,
+                            job_name,
+                            display_name,
+                            nested_uses,
+                            findings,
+                            visited,
+                        )
         elif "/.github/workflows/" in normalized:
             findings.append(
                 Finding(
