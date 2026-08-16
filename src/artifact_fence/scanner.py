@@ -296,6 +296,24 @@ def _has_glob(pattern: str) -> bool:
     return any(character in pattern for character in "*?[")
 
 
+def _sensitive_literal_patterns(patterns: Iterable[str]) -> list[str]:
+    """Literal static patterns whose filename is credential-class.
+
+    A glob like ``*.env`` is excluded: a wildcard matching nothing is not proof of
+    intent to upload a specific credential file. A literal ``.env`` is.
+    """
+
+    sensitive: list[str] = []
+    for raw in patterns:
+        pattern = raw[1:].strip() if raw.startswith("!") else raw
+        if _has_glob(pattern) or _is_unsafe_pattern(pattern):
+            continue
+        name = Path(pattern.replace("\\", "/").rstrip("/")).name.lower()
+        if name in SENSITIVE_FILENAMES or name.startswith(".env."):
+            sensitive.append(raw)
+    return sensitive
+
+
 def _matches(relative: str, pattern: str) -> bool:
     normalized = pattern.replace("\\", "/").strip()
     while normalized.startswith("./"):
@@ -516,17 +534,34 @@ def _scan_workflow(root: Path, workflow_path: Path) -> tuple[list[Artifact], lis
                     )
                 )
             if not files and not dynamic and not unsafe and not truncated:
-                findings.append(
-                    Finding(
-                        "artifact-path-not-present",
-                        "info",
-                        "No matching files exist in the current worktree; the path may be produced only during CI.",
-                        workflow_name,
-                        str(job_name),
-                        step,
-                        artifact.name,
+                sensitive_patterns = _sensitive_literal_patterns(patterns)
+                if sensitive_patterns:
+                    findings.append(
+                        Finding(
+                            "sensitive-filename-absent",
+                            "high",
+                            "Artifact declares a credential-class filename that is absent from the "
+                            "worktree; its contents cannot be reviewed and CI may produce it before "
+                            "upload.",
+                            workflow_name,
+                            str(job_name),
+                            step,
+                            artifact.name,
+                            sensitive_patterns[0],
+                        )
                     )
-                )
+                else:
+                    findings.append(
+                        Finding(
+                            "artifact-path-not-present",
+                            "info",
+                            "No matching files exist in the current worktree; the path may be produced only during CI.",
+                            workflow_name,
+                            str(job_name),
+                            step,
+                            artifact.name,
+                        )
+                    )
             findings.extend(_file_findings(root, files, workflow_name, str(job_name), step, artifact.name))
     return artifacts, findings
 

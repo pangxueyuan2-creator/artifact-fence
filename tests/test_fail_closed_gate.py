@@ -32,6 +32,55 @@ class FailClosedGateTests(unittest.TestCase):
             code = main(["check", str(root), *args])
         return code, stdout.getvalue()
 
+    def test_check_fails_on_absent_credential_class_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write(
+                root,
+                ".github/workflows/ci.yml",
+                WORKFLOW_HEADER
+                + """      - uses: actions/upload-artifact@v4
+        with:
+          path: .env
+""",
+            )
+            code, output = self.run_cli(root)
+            self.assertEqual(1, code)
+            self.assertIn("HIGH sensitive-filename-absent", output)
+            self.assertNotIn("artifact-path-not-present", output)
+
+    def test_check_fails_on_absent_env_prefixed_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write(
+                root,
+                ".github/workflows/ci.yml",
+                WORKFLOW_HEADER
+                + """      - uses: actions/upload-artifact@v4
+        with:
+          path: config/.env.production
+""",
+            )
+            code, output = self.run_cli(root)
+            self.assertEqual(1, code)
+            self.assertIn("HIGH sensitive-filename-absent", output)
+
+    def test_absent_non_sensitive_static_path_remains_info(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write(
+                root,
+                ".github/workflows/ci.yml",
+                WORKFLOW_HEADER
+                + """      - uses: actions/upload-artifact@v4
+        with:
+          path: build/results.txt
+""",
+            )
+            code, output = self.run_cli(root)
+            self.assertEqual(0, code)
+            self.assertIn("INFO artifact-path-not-present", output)
+
     def test_default_check_fails_on_dynamic_artifact_path(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
