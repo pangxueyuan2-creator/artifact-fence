@@ -110,6 +110,108 @@ def _local_composite_uploads(root: Path, workflows: Iterable[str | Path] | None)
     return findings
 
 
+def _reusable_workflow_uploads(
+    root: Path, workflows: Iterable[str | Path] | None
+) -> list[Finding]:
+    """Surface artifact uploads that hide behind reusable workflow calls.
+
+    Local reusable workflows are statically inspectable: a direct upload step
+    inside them is a high finding, matching the composite-action gate. Remote
+    reusable workflows cannot be inspected at all; calling one is a medium
+    finding so the unknown upload surface stays visible instead of silent.
+    """
+
+    findings: list[Finding] = []
+    for workflow_path in _workflow_paths(root, workflows):
+        document = _read_yaml(workflow_path)
+        jobs = document.get("jobs")
+        if not isinstance(jobs, dict):
+            continue
+        workflow_name = _relative(root, workflow_path)
+        for job_name, job in jobs.items():
+            if not isinstance(job, dict) or not isinstance(job.get("steps"), list):
+                continue
+            for index, raw_step in enumerate(job["steps"], start=1):
+                if not isinstance(raw_step, dict):
+                    continue
+                uses = str(raw_step.get("uses", "")).strip()
+                if not uses:
+                    continue
+                step_name = str(raw_step.get("name") or f"step-{index}").strip()
+                normalized = uses.replace("\\", "/")
+                if uses.startswith("./") and "/.github/workflows/" in normalized:
+                    candidate = (root / uses).resolve()
+                    if not _is_within(root, candidate) or not candidate.is_file():
+                        findings.append(
+                            Finding(
+                                "unresolved-local-workflow",
+                                "high",
+                                "Local reusable workflow cannot be resolved safely; upload surface cannot be established.",
+                                workflow_name,
+                                str(job_name),
+                                step_name,
+                                uses,
+                                uses,
+                            )
+                        )
+                        continue
+                    try:
+                        nested = _read_yaml(candidate)
+                    except ValueError:
+                        findings.append(
+                            Finding(
+                                "unresolved-local-workflow",
+                                "high",
+                                "Local reusable workflow cannot be parsed safely; upload surface cannot be established.",
+                                workflow_name,
+                                str(job_name),
+                                step_name,
+                                uses,
+                                _relative(root, candidate),
+                            )
+                        )
+                        continue
+                    nested_jobs = nested.get("jobs")
+                    for nested_step in (
+                        step
+                        for nested_job in nested_jobs.values()
+                        if isinstance(nested_jobs, dict)
+                        and isinstance(nested_job, dict)
+                        and isinstance(nested_job.get("steps"), list)
+                        for step in nested_job["steps"]
+                        if isinstance(step, dict)
+                    ):
+                        action, _ = _action_ref(str(nested_step.get("uses", "")))
+                        if action in {"actions/upload-artifact", "actions/upload-pages-artifact"}:
+                            findings.append(
+                                Finding(
+                                    "local-reusable-workflow-artifact-upload",
+                                    "high",
+                                    "A local reusable workflow contains an artifact upload that the direct workflow scanner cannot enumerate; gate fails closed.",
+                                    workflow_name,
+                                    str(job_name),
+                                    step_name,
+                                    uses,
+                                    _relative(root, candidate),
+                                )
+                            )
+                            break
+                elif "/.github/workflows/" in normalized:
+                    findings.append(
+                        Finding(
+                            "reusable-workflow-upload-unknown",
+                            "medium",
+                            "Reusable workflow call cannot be statically inspected for artifact uploads; review its upload steps separately.",
+                            workflow_name,
+                            str(job_name),
+                            step_name,
+                            uses,
+                            uses,
+                        )
+                    )
+    return findings
+
+
 def fail_closed_findings(
     root: str | Path,
     report: ScanReport,
@@ -134,6 +236,7 @@ def fail_closed_findings(
                 )
             )
     findings.extend(_local_composite_uploads(root_path, workflows))
+    findings.extend(_reusable_workflow_uploads(root_path, workflows))
     findings.sort(
         key=lambda finding: (
             finding.workflow,
