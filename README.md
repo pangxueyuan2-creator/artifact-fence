@@ -77,7 +77,7 @@ artifact-fence check . --min-severity high
 | `private-key` / `github-token` / `aws-access-key` | high | 文本文件匹配常见私钥或 token 形态；值绝不回显。 |
 | `unsafe-artifact-path` | high | upload path 为绝对、home-relative 或含 `..` 的路径。 |
 | `dynamic-artifact-path` | medium | upload path 含表达式/命令替换，静态分析不会猜测展开结果。 |
-| `sensitive-filename-absent` | high | upload path 字面声明了 `.env` 类凭据文件名，但工作树中尚不存在；内容无法审查，CI 可能在执行时生成后上传。 |
+| `sensitive-filename-absent` | high | upload path 字面声明了 `.env` 类凭据文件名，但工作树中尚不存在（即使同一步骤的其他路径命中）；内容无法审查，CI 可能在执行时生成后上传。 |
 | `artifact-path-not-present` | info | 当前工作树没有匹配的**非隐藏**文件，可能由 CI 执行时生成。 |
 | `artifact-file-too-large` | info | 为限制资源消耗，只检查大文件的前 1 MiB；报告不保证覆盖其余内容。 |
 | `artifact-enumeration-truncated` | high | 工作树枚举超过安全上限，报告不完整；`check` fail-closed。 |

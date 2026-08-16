@@ -65,6 +65,99 @@ class FailClosedGateTests(unittest.TestCase):
             self.assertEqual(1, code)
             self.assertIn("HIGH sensitive-filename-absent", output)
 
+    def test_mixed_pattern_list_still_flags_absent_credential_literal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write(root, "dist/artifact.txt", "payload\n")
+            write(
+                root,
+                ".github/workflows/ci.yml",
+                WORKFLOW_HEADER
+                + """      - uses: actions/upload-artifact@v4
+        with:
+          path: |
+            dist/**
+            .env
+""",
+            )
+            code, output = self.run_cli(root)
+            self.assertEqual(1, code)
+            self.assertIn("HIGH sensitive-filename-absent", output)
+            self.assertIn("includes: dist/artifact.txt", output)
+
+    def test_mixed_list_absent_non_sensitive_literal_stays_silent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write(root, "dist/artifact.txt", "payload\n")
+            write(
+                root,
+                ".github/workflows/ci.yml",
+                WORKFLOW_HEADER
+                + """      - uses: actions/upload-artifact@v4
+        with:
+          path: |
+            dist/**
+            build/results.txt
+""",
+            )
+            code, output = self.run_cli(root)
+            self.assertEqual(0, code)
+            self.assertNotIn("sensitive-filename-absent", output)
+            self.assertNotIn("artifact-path-not-present", output)
+
+    def test_negated_sensitive_pattern_matching_nothing_is_not_flagged(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write(root, "dist/artifact.txt", "payload\n")
+            write(
+                root,
+                ".github/workflows/ci.yml",
+                WORKFLOW_HEADER
+                + """      - uses: actions/upload-artifact@v4
+        with:
+          path: |
+            dist/**
+            !.env
+""",
+            )
+            code, output = self.run_cli(root)
+            self.assertEqual(0, code)
+            self.assertNotIn("sensitive-filename-absent", output)
+
+    def test_upload_scope_named_env_directory_is_flagged(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write(root, ".env/secrets.txt", "API_KEY=real\n")
+            write(
+                root,
+                ".github/workflows/ci.yml",
+                WORKFLOW_HEADER
+                + """      - uses: actions/upload-artifact@v4
+        with:
+          path: .env/
+""",
+            )
+            code, output = self.run_cli(root)
+            self.assertEqual(1, code)
+            self.assertIn("HIGH sensitive-filename", output)
+
+    def test_present_env_file_reports_exactly_one_sensitive_finding(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write(root, ".env", "TOKEN=value\n")
+            write(
+                root,
+                ".github/workflows/ci.yml",
+                WORKFLOW_HEADER
+                + """      - uses: actions/upload-artifact@v4
+        with:
+          path: .env
+""",
+            )
+            code, output = self.run_cli(root)
+            self.assertEqual(1, code)
+            self.assertEqual(output.count("HIGH sensitive-filename"), 1)
+
     def test_absent_non_sensitive_static_path_remains_info(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
