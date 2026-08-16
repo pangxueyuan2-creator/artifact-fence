@@ -95,6 +95,97 @@ runs:
             self.assertEqual(0, code)
             self.assertIn("HIGH unresolved-artifact-surface", stdout.getvalue())
 
+    def test_remote_reusable_workflow_job_call_is_visible(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write(
+                root,
+                ".github/workflows/ci.yml",
+                """name: test
+on: [push]
+jobs:
+  publish:
+    uses: some-org/deploy/.github/workflows/publish.yml@v1
+    secrets: inherit
+""",
+            )
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                code = main(["scan", str(root)])
+            self.assertEqual(0, code)
+            self.assertIn("MEDIUM reusable-workflow-upload-unknown", stdout.getvalue())
+            code, _ = self.run_cli(root)
+            self.assertEqual(0, code)
+
+    def test_reusable_workflow_with_null_jobs_does_not_crash(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write(
+                root,
+                ".github/workflows/ci.yml",
+                """name: test
+on: [push]
+jobs:
+  publish:
+    uses: ./.github/workflows/publish.yml
+""",
+            )
+            write(
+                root,
+                ".github/workflows/publish.yml",
+                "name: publish\non: [workflow_call]\njobs:\n",
+            )
+            code, output = self.run_cli(root)
+            self.assertEqual(0, code)
+            self.assertNotIn("Traceback", output)
+
+    def test_local_reusable_workflow_job_with_upload_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write(
+                root,
+                ".github/workflows/ci.yml",
+                """name: test
+on: [push]
+jobs:
+  publish:
+    uses: ./.github/workflows/publish.yml
+""",
+            )
+            write(
+                root,
+                ".github/workflows/publish.yml",
+                """name: publish
+on: [workflow_call]
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/upload-artifact@v4
+        with:
+          path: build/**
+""",
+            )
+            code, output = self.run_cli(root)
+            self.assertEqual(1, code)
+            self.assertIn("HIGH local-reusable-workflow-artifact-upload", output)
+
+    def test_malformed_step_level_workflow_reference_remains_visible(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write(
+                root,
+                ".github/workflows/ci.yml",
+                WORKFLOW_HEADER
+                + """      - uses: some-org/deploy/.github/workflows/publish.yml@v1
+""",
+            )
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                code = main(["scan", str(root)])
+            self.assertEqual(0, code)
+            self.assertIn("MEDIUM reusable-workflow-upload-unknown", stdout.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()
