@@ -95,16 +95,18 @@ runs:
             self.assertEqual(0, code)
             self.assertIn("HIGH unresolved-artifact-surface", stdout.getvalue())
 
-    def test_remote_reusable_workflow_call_is_visible(self) -> None:
+    def test_remote_reusable_workflow_job_call_is_visible(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             write(
                 root,
                 ".github/workflows/ci.yml",
-                WORKFLOW_HEADER
-                + """      - uses: some-org/deploy/.github/workflows/publish.yml@v1
-        with:
-          secret: ${{ secrets.TOKEN }}
+                """name: test
+on: [push]
+jobs:
+  publish:
+    uses: some-org/deploy/.github/workflows/publish.yml@v1
+    secrets: inherit
 """,
             )
             stdout = io.StringIO()
@@ -122,8 +124,11 @@ runs:
             write(
                 root,
                 ".github/workflows/ci.yml",
-                WORKFLOW_HEADER
-                + """      - uses: ./.github/workflows/publish.yml
+                """name: test
+on: [push]
+jobs:
+  publish:
+    uses: ./.github/workflows/publish.yml
 """,
             )
             write(
@@ -135,14 +140,17 @@ runs:
             self.assertEqual(0, code)
             self.assertNotIn("Traceback", output)
 
-    def test_local_reusable_workflow_with_upload_fails_closed(self) -> None:
+    def test_local_reusable_workflow_job_with_upload_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             write(
                 root,
                 ".github/workflows/ci.yml",
-                WORKFLOW_HEADER
-                + """      - uses: ./.github/workflows/publish.yml
+                """name: test
+on: [push]
+jobs:
+  publish:
+    uses: ./.github/workflows/publish.yml
 """,
             )
             write(
@@ -162,6 +170,22 @@ jobs:
             code, output = self.run_cli(root)
             self.assertEqual(1, code)
             self.assertIn("HIGH local-reusable-workflow-artifact-upload", output)
+
+    def test_malformed_step_level_workflow_reference_remains_visible(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write(
+                root,
+                ".github/workflows/ci.yml",
+                WORKFLOW_HEADER
+                + """      - uses: some-org/deploy/.github/workflows/publish.yml@v1
+""",
+            )
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                code = main(["scan", str(root)])
+            self.assertEqual(0, code)
+            self.assertIn("MEDIUM reusable-workflow-upload-unknown", stdout.getvalue())
 
 
 if __name__ == "__main__":
