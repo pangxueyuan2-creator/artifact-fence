@@ -116,6 +116,25 @@ runs:
             code, _ = self.run_cli(root)
             self.assertEqual(0, code)
 
+    def test_reusable_workflow_with_null_jobs_does_not_crash(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write(
+                root,
+                ".github/workflows/ci.yml",
+                WORKFLOW_HEADER
+                + """      - uses: ./.github/workflows/publish.yml
+""",
+            )
+            write(
+                root,
+                ".github/workflows/publish.yml",
+                "name: publish\non: [workflow_call]\njobs:\n",
+            )
+            code, output = self.run_cli(root)
+            self.assertEqual(0, code)
+            self.assertNotIn("Traceback", output)
+
     def test_local_reusable_workflow_with_upload_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

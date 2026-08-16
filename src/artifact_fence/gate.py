@@ -172,15 +172,17 @@ def _reusable_workflow_uploads(
                         )
                         continue
                     nested_jobs = nested.get("jobs")
-                    for nested_step in (
-                        step
-                        for nested_job in nested_jobs.values()
-                        if isinstance(nested_jobs, dict)
-                        and isinstance(nested_job, dict)
-                        and isinstance(nested_job.get("steps"), list)
-                        for step in nested_job["steps"]
-                        if isinstance(step, dict)
-                    ):
+                    nested_steps: Iterable[dict] = ()
+                    if isinstance(nested_jobs, dict):
+                        nested_steps = (
+                            step
+                            for nested_job in nested_jobs.values()
+                            if isinstance(nested_job, dict)
+                            and isinstance(nested_job.get("steps"), list)
+                            for step in nested_job["steps"]
+                            if isinstance(step, dict)
+                        )
+                    for nested_step in nested_steps:
                         action, _ = _action_ref(str(nested_step.get("uses", "")))
                         if action in {"actions/upload-artifact", "actions/upload-pages-artifact"}:
                             findings.append(
