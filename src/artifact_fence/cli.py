@@ -8,6 +8,7 @@ from pathlib import Path
 import sys
 from typing import Sequence
 
+from .gate import fail_closed_findings
 from .scanner import ScanReport, has_severity, scan_project
 
 
@@ -54,7 +55,7 @@ def _text(report: ScanReport) -> str:
         f"{summary['findings']} finding(s) across {summary['workflows']} workflow(s)."
     ]
     if not report.artifacts:
-        lines.append("No actions/upload-artifact or actions/upload-pages-artifact steps found.")
+        lines.append("No direct actions/upload-artifact or actions/upload-pages-artifact steps found.")
     for artifact in report.artifacts:
         lines.append(
             f"ARTIFACT {artifact.name}: {artifact.workflow} / {artifact.job} / {artifact.step}"
@@ -86,7 +87,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(__version__)
         return 0
     try:
-        report = scan_project(Path(args.root), workflows=args.workflow)
+        root = Path(args.root)
+        report = scan_project(root, workflows=args.workflow)
+        report.findings.extend(fail_closed_findings(root, report, workflows=args.workflow))
     except ValueError as exc:
         print(f"artifact-fence: error: {exc}", file=sys.stderr)
         return 2
