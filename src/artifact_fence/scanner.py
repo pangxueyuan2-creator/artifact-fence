@@ -328,17 +328,19 @@ def _matches(relative: str, pattern: str) -> bool:
 
 def _match_files(
     root: Path, patterns: Iterable[str], include_hidden: bool
-) -> tuple[list[Path], list[str], bool, bool, bool]:
+) -> tuple[list[Path], list[str], bool, bool, bool, list[str]]:
     """Resolve static patterns from one bounded walk.
 
-    Returns files, dynamic patterns, selected outside-root links, truncation, and
-    selected in-root directory/file links skipped without traversal.
+    Returns files, dynamic patterns, selected outside-root links, truncation,
+    selected in-root directory/file links skipped without traversal, and positive
+    static patterns that matched neither files nor links.
     """
 
     walk = _walk_files(root)
     included: set[Path] = set()
     included_links: dict[str, bool] = {}
     dynamic: list[str] = []
+    unmatched: list[str] = []
     for raw in patterns:
         if "${{" in raw or "$(" in raw or "${" in raw:
             dynamic.append(raw)
@@ -346,7 +348,7 @@ def _match_files(
         excluded = raw.startswith("!")
         pattern = raw[1:].strip() if excluded else raw
         if _is_unsafe_pattern(pattern):
-            return sorted(included), dynamic, True, walk.truncated, False
+            return sorted(included), dynamic, True, walk.truncated, False, unmatched
         matching_files = {
             file_path
             for file_path in walk.files
@@ -366,11 +368,13 @@ def _match_files(
         else:
             included.update(matching_files)
             included_links.update(matching_links)
+            if not matching_files and not matching_links:
+                unmatched.append(raw)
         if len(included) > MAX_FILES_PER_ARTIFACT:
-            return sorted(included)[:MAX_FILES_PER_ARTIFACT], dynamic, False, True, False
+            return sorted(included)[:MAX_FILES_PER_ARTIFACT], dynamic, False, True, False, unmatched
     outside_link = any(not target_inside for target_inside in included_links.values())
     skipped_link = any(target_inside for target_inside in included_links.values())
-    return sorted(included), dynamic, outside_link, walk.truncated, skipped_link
+    return sorted(included), dynamic, outside_link, walk.truncated, skipped_link, unmatched
 
 
 def _file_findings(
@@ -468,7 +472,9 @@ def _scan_workflow(root: Path, workflow_path: Path) -> tuple[list[Artifact], lis
                 include_hidden_files=include_hidden,
                 hidden_file_mode=hidden_mode,
             )
-            files, dynamic, unsafe, truncated, skipped_link = _match_files(root, patterns, include_hidden)
+            files, dynamic, unsafe, truncated, skipped_link, unmatched = _match_files(
+                root, patterns, include_hidden
+            )
             artifact.files = [_relative(root, file_path) for file_path in files if _relative(root, file_path)]
             artifact.dynamic_patterns = dynamic
             artifacts.append(artifact)
@@ -533,6 +539,22 @@ def _scan_workflow(root: Path, workflow_path: Path) -> tuple[list[Artifact], lis
                         dynamic_pattern,
                     )
                 )
+            if files and unmatched:
+                for pattern in _sensitive_literal_patterns(unmatched):
+                    findings.append(
+                        Finding(
+                            "sensitive-filename-absent",
+                            "high",
+                            "Artifact declares a credential-class filename that is absent from the "
+                            "worktree; its contents cannot be reviewed and CI may produce it before "
+                            "upload.",
+                            workflow_name,
+                            str(job_name),
+                            step,
+                            artifact.name,
+                            pattern,
+                        )
+                    )
             if not files and not dynamic and not unsafe and not truncated:
                 sensitive_patterns = _sensitive_literal_patterns(patterns)
                 if sensitive_patterns:
@@ -562,7 +584,33 @@ def _scan_workflow(root: Path, workflow_path: Path) -> tuple[list[Artifact], lis
                             artifact.name,
                         )
                     )
-            findings.extend(_file_findings(root, files, workflow_name, str(job_name), step, artifact.name))
+            file_findings = _file_findings(root, files, workflow_name, str(job_name), step, artifact.name)
+            findings.extend(file_findings)
+            file_sensitive_paths = {
+                finding.path
+                for finding in file_findings
+                if finding.rule_id == "sensitive-filename"
+            }
+            # A literal credential-class scope is itself a declaration of intent even
+            # when its contents carry innocent names (e.g. a directory named .env).
+            for pattern in _sensitive_literal_patterns(patterns):
+                if pattern.startswith("!"):
+                    continue  # negations are exclusions, not upload declarations
+                name_path = Path(pattern.replace("\\", "/").rstrip("/")).as_posix()
+                if name_path in file_sensitive_paths:
+                    continue
+                findings.append(
+                    Finding(
+                        "sensitive-filename",
+                        "high",
+                        "Artifact includes a filename commonly used for credentials or environment secrets.",
+                        workflow_name,
+                        str(job_name),
+                        step,
+                        artifact.name,
+                        name_path,
+                    )
+                )
     return artifacts, findings
 
 
