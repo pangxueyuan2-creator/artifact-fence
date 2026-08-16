@@ -95,18 +95,16 @@ runs:
             self.assertEqual(0, code)
             self.assertIn("HIGH unresolved-artifact-surface", stdout.getvalue())
 
-    def test_remote_reusable_workflow_job_call_is_visible(self) -> None:
+    def test_remote_reusable_workflow_call_is_visible(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             write(
                 root,
                 ".github/workflows/ci.yml",
-                """name: test
-on: [push]
-jobs:
-  publish:
-    uses: some-org/deploy/.github/workflows/publish.yml@v1
-    secrets: inherit
+                WORKFLOW_HEADER
+                + """      - uses: some-org/deploy/.github/workflows/publish.yml@v1
+        with:
+          secret: ${{ secrets.TOKEN }}
 """,
             )
             stdout = io.StringIO()
@@ -114,6 +112,7 @@ jobs:
                 code = main(["scan", str(root)])
             self.assertEqual(0, code)
             self.assertIn("MEDIUM reusable-workflow-upload-unknown", stdout.getvalue())
+            # Default high threshold stays usable; stricter gates can lower it.
             code, _ = self.run_cli(root)
             self.assertEqual(0, code)
 
@@ -123,11 +122,8 @@ jobs:
             write(
                 root,
                 ".github/workflows/ci.yml",
-                """name: test
-on: [push]
-jobs:
-  publish:
-    uses: ./.github/workflows/publish.yml
+                WORKFLOW_HEADER
+                + """      - uses: ./.github/workflows/publish.yml
 """,
             )
             write(
@@ -139,17 +135,14 @@ jobs:
             self.assertEqual(0, code)
             self.assertNotIn("Traceback", output)
 
-    def test_local_reusable_workflow_job_with_upload_fails_closed(self) -> None:
+    def test_local_reusable_workflow_with_upload_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             write(
                 root,
                 ".github/workflows/ci.yml",
-                """name: test
-on: [push]
-jobs:
-  publish:
-    uses: ./.github/workflows/publish.yml
+                WORKFLOW_HEADER
+                + """      - uses: ./.github/workflows/publish.yml
 """,
             )
             write(
@@ -170,21 +163,68 @@ jobs:
             self.assertEqual(1, code)
             self.assertIn("HIGH local-reusable-workflow-artifact-upload", output)
 
-    def test_malformed_step_level_workflow_reference_remains_visible(self) -> None:
+    def test_local_composite_action_with_both_upload_actions_surfaces_both(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             write(
                 root,
                 ".github/workflows/ci.yml",
                 WORKFLOW_HEADER
-                + """      - uses: some-org/deploy/.github/workflows/publish.yml@v1
+                + """      - name: publish through local action
+        uses: ./.github/actions/publish
 """,
             )
-            stdout = io.StringIO()
-            with contextlib.redirect_stdout(stdout):
-                code = main(["scan", str(root)])
-            self.assertEqual(0, code)
-            self.assertIn("MEDIUM reusable-workflow-upload-unknown", stdout.getvalue())
+            write(
+                root,
+                ".github/actions/publish/action.yml",
+                """name: publish
+runs:
+  using: composite
+  steps:
+    - uses: actions/upload-artifact@v4
+      with:
+        path: build/**
+    - uses: actions/upload-pages-artifact@v3
+      with:
+        path: _site
+""",
+            )
+            code, output = self.run_cli(root)
+            self.assertEqual(1, code)
+            self.assertEqual(2, output.count("HIGH local-composite-artifact-upload"))
+
+    def test_local_reusable_workflow_with_both_upload_actions_surfaces_both(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write(
+                root,
+                ".github/workflows/ci.yml",
+                WORKFLOW_HEADER
+                + """      - uses: ./.github/workflows/publish.yml
+""",
+            )
+            write(
+                root,
+                ".github/workflows/publish.yml",
+                """name: publish
+on: [workflow_call]
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/upload-artifact@v4
+        with:
+          path: build/**
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+""",
+            )
+            code, output = self.run_cli(root)
+            self.assertEqual(1, code)
+            self.assertEqual(
+                2, output.count("HIGH local-reusable-workflow-artifact-upload")
+            )
 
 
 if __name__ == "__main__":

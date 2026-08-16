@@ -82,8 +82,11 @@ artifact-fence check . --min-severity high
 | `artifact-enumeration-truncated` | high | 工作树枚举超过安全上限，报告不完整；`check` fail-closed。 |
 | `artifact-symlink-skipped` | info | 选中了指向仓库内的符号链接，但为避免链接语义不确定性未遍历其目标。 |
 | `dynamic-include-hidden-files` | medium | `include-hidden-files` 为动态表达式；静态枚举会保守地**包含**隐藏文件，避免漏报。 |
+| `reusable-workflow-upload-unknown` | medium | 本地 reusable workflow 中出现的 upload step：其实际 path 取决于调用方输入，按**可能上传**处理。 |
 
 Artifact Fence 支持 `actions/upload-artifact` 与 `actions/upload-pages-artifact`；多行 path 和 `!` 排除模式会按顺序解释，目录路径会递归展开。为了避免 action ref 或运行时表达式造成 hidden-file 漏报，**只有显式静态的 `include-hidden-files: false` 才会排除隐藏文件**；省略、动态、浮动或 Pages 情况都按“可能上传”枚举。`upload-pages-artifact` 省略 path 时使用 `_site/` 默认目录。绝对、UNC、Windows drive 或 `..` 越界路径会被拒绝为 high finding。
+
+仓库内的 reusable workflow 调用会按其输入解析（不跟踪远端仓库）；本地 reusable workflow **定义** 中的 upload step 无法静态确定 path，会记为 medium 的 `reusable-workflow-upload-unknown`。要用 CI 门禁拦住这类间接上传面，请使用 `--min-severity medium`（默认 `high` 不会拦截 medium finding）。
 
 ## JSON API
 
