@@ -64,7 +64,11 @@ def _inspect_local_composite(
         )
         return
     metadata = next(
-        (candidate for candidate in (action_dir / "action.yml", action_dir / "action.yaml") if candidate.is_file()),
+        (
+            candidate
+            for candidate in (action_dir / "action.yml", action_dir / "action.yaml")
+            if candidate.is_file()
+        ),
         None,
     )
     if metadata is None:
@@ -155,9 +159,7 @@ def _local_composite_uploads(root: Path, workflows: Iterable[str | Path] | None)
     return findings
 
 
-def _reusable_workflow_uploads(
-    root: Path, workflows: Iterable[str | Path] | None
-) -> list[Finding]:
+def _reusable_workflow_uploads(root: Path, workflows: Iterable[str | Path] | None) -> list[Finding]:
     """Surface artifact uploads hidden behind reusable workflow calls.
 
     GitHub reusable workflows are invoked at job level via ``jobs.<id>.uses``.
@@ -168,11 +170,15 @@ def _reusable_workflow_uploads(
 
     findings: list[Finding] = []
     visited: set[str] = set()
+    visited_workflows: set[str] = set()
 
     def inspect_call(workflow_name: str, job_name: str, uses: str, display_name: str) -> None:
         normalized = uses.replace("\\", "/")
         if uses.startswith("./") and normalized.startswith("./.github/workflows/"):
             candidate = (root / uses).resolve()
+            if str(candidate) in visited_workflows:
+                return
+            visited_workflows.add(str(candidate))
             if not _is_within(root, candidate) or not candidate.is_file():
                 findings.append(
                     Finding(
@@ -206,9 +212,14 @@ def _reusable_workflow_uploads(
             nested_jobs = nested.get("jobs")
             if not isinstance(nested_jobs, dict):
                 return
-            for nested_job in nested_jobs.values():
+            for nested_job_name, nested_job in nested_jobs.items():
                 if not isinstance(nested_job, dict):
                     continue
+                # A job-level reusable workflow call chains one level deeper;
+                # inspect it with the same visited-set protection.
+                job_uses = str(nested_job.get("uses", "")).strip()
+                if job_uses and "/.github/workflows/" in job_uses.replace("\\", "/"):
+                    inspect_call(workflow_name, job_name, job_uses, str(nested_job_name))
                 nested_steps = nested_job.get("steps")
                 if not isinstance(nested_steps, list):
                     continue
@@ -242,6 +253,8 @@ def _reusable_workflow_uploads(
                             findings,
                             visited,
                         )
+                    elif "/.github/workflows/" in nested_uses.replace("\\", "/"):
+                        inspect_call(workflow_name, job_name, nested_uses, display_name)
         elif "/.github/workflows/" in normalized:
             findings.append(
                 Finding(
