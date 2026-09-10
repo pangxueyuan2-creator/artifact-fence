@@ -259,8 +259,8 @@ def _reusable_workflow_uploads(root: Path, workflows: Iterable[str | Path] | Non
             findings.append(
                 Finding(
                     "reusable-workflow-upload-unknown",
-                    "medium",
-                    "Reusable workflow call cannot be statically inspected for artifact uploads; review its upload steps separately.",
+                    "high",
+                    "Reusable workflow call cannot be statically inspected for artifact uploads; gate fails closed until its upload surface is reviewed separately.",
                     workflow_name,
                     job_name,
                     display_name,
