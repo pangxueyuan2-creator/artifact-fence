@@ -255,9 +255,9 @@ jobs:
             with contextlib.redirect_stdout(stdout):
                 code = main(["scan", str(root)])
             self.assertEqual(0, code)
-            self.assertIn("MEDIUM reusable-workflow-upload-unknown", stdout.getvalue())
+            self.assertIn("HIGH reusable-workflow-upload-unknown", stdout.getvalue())
             code, _ = self.run_cli(root)
-            self.assertEqual(0, code)
+            self.assertEqual(1, code)
 
     def test_reusable_workflow_with_null_jobs_does_not_crash(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -326,7 +326,7 @@ jobs:
             with contextlib.redirect_stdout(stdout):
                 code = main(["scan", str(root)])
             self.assertEqual(0, code)
-            self.assertIn("MEDIUM reusable-workflow-upload-unknown", stdout.getvalue())
+            self.assertIn("HIGH reusable-workflow-upload-unknown", stdout.getvalue())
 
     def test_upload_hidden_in_nested_local_composite_chain_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -544,8 +544,8 @@ jobs:
 """,
             )
             code, output = self.run_cli(root, "--workflow", ".github/workflows/ci.yml")
-            self.assertEqual(0, code)
-            self.assertIn("MEDIUM reusable-workflow-upload-unknown", output)
+            self.assertEqual(1, code)
+            self.assertIn("HIGH reusable-workflow-upload-unknown", output)
 
 
 if __name__ == "__main__":
