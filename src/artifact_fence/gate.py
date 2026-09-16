@@ -7,6 +7,10 @@ from typing import Iterable
 
 from .scanner import Finding, ScanReport, _action_ref, _is_within, _read_yaml, discover_workflows
 
+MAX_LOCAL_ACTIONS = 256
+MAX_LOCAL_WORKFLOWS = 256
+MAX_REFERENCE_DEPTH = 32
+
 
 def _workflow_paths(root: Path, workflows: Iterable[str | Path] | None) -> list[Path]:
     if workflows is None:
@@ -37,16 +41,31 @@ def _inspect_local_composite(
     uses: str,
     findings: list[Finding],
     visited: set[str],
+    depth: int = 0,
 ) -> None:
     """Recursively inspect a local composite action for artifact uploads.
 
-    Chains of local composite actions (action -> action -> ... -> upload) are
-    traversed with a visited set, so uploads hidden behind any nesting depth
-    still fail the gate closed. Cycles terminate via the visited set.
+    Chains are traversed with a visited set and explicit depth/node bounds.
+    Missing metadata and exhausted inspection budgets fail the gate closed.
     """
 
     key = str(action_dir)
     if key in visited:
+        return
+    if depth >= MAX_REFERENCE_DEPTH or len(visited) >= MAX_LOCAL_ACTIONS:
+        findings.append(
+            Finding(
+                "local-action-inspection-limit",
+                "high",
+                "Local action inspection exceeded its depth or node budget; upload surface is "
+                "unresolved.",
+                workflow_name,
+                job_name,
+                step_name,
+                uses,
+                uses,
+            )
+        )
         return
     visited.add(key)
     if not _is_within(root, action_dir):
@@ -54,7 +73,8 @@ def _inspect_local_composite(
             Finding(
                 "unresolved-local-action",
                 "high",
-                "Local action resolves outside the repository; upload surface cannot be established.",
+                "Local action resolves outside the repository; upload surface cannot be "
+                "established.",
                 workflow_name,
                 job_name,
                 step_name,
@@ -72,6 +92,32 @@ def _inspect_local_composite(
         None,
     )
     if metadata is None:
+        findings.append(
+            Finding(
+                "unresolved-local-action",
+                "high",
+                "Local action metadata is missing; upload surface cannot be established.",
+                workflow_name,
+                job_name,
+                step_name,
+                uses,
+                uses,
+            )
+        )
+        return
+    if not _is_within(root, metadata.resolve()):
+        findings.append(
+            Finding(
+                "unresolved-local-action",
+                "high",
+                "Local action metadata resolves outside the repository; it was not read.",
+                workflow_name,
+                job_name,
+                step_name,
+                uses,
+                uses,
+            )
+        )
         return
     try:
         action_document = _read_yaml(metadata)
@@ -80,7 +126,8 @@ def _inspect_local_composite(
             Finding(
                 "unresolved-local-action",
                 "high",
-                "Local action metadata cannot be parsed safely; upload surface cannot be established.",
+                "Local action metadata cannot be parsed safely; upload surface cannot be "
+                "established.",
                 workflow_name,
                 job_name,
                 step_name,
@@ -90,10 +137,38 @@ def _inspect_local_composite(
         )
         return
     runs = action_document.get("runs")
-    if not isinstance(runs, dict) or str(runs.get("using", "")).lower() != "composite":
+    if not isinstance(runs, dict) or not isinstance(runs.get("using"), str):
+        findings.append(
+            Finding(
+                "unresolved-local-action",
+                "high",
+                "Local action has malformed execution metadata; upload surface is unresolved.",
+                workflow_name,
+                job_name,
+                step_name,
+                uses,
+                _relative(root, metadata),
+            )
+        )
+        return
+    if runs["using"].lower() != "composite":
         return
     nested_steps = runs.get("steps")
-    if not isinstance(nested_steps, list):
+    if not isinstance(nested_steps, list) or not all(
+        isinstance(step, dict) for step in nested_steps
+    ):
+        findings.append(
+            Finding(
+                "unresolved-local-action",
+                "high",
+                "Local composite action has malformed steps; upload surface cannot be established.",
+                workflow_name,
+                job_name,
+                step_name,
+                uses,
+                _relative(root, metadata),
+            )
+        )
         return
     for nested in nested_steps:
         if not isinstance(nested, dict):
@@ -105,7 +180,8 @@ def _inspect_local_composite(
                 Finding(
                     "local-composite-artifact-upload",
                     "high",
-                    "A local composite action contains an artifact upload that the direct workflow scanner cannot enumerate; gate fails closed.",
+                    "A local composite action contains an artifact upload that the direct "
+                    "workflow scanner cannot enumerate; gate fails closed.",
                     workflow_name,
                     job_name,
                     step_name,
@@ -124,6 +200,7 @@ def _inspect_local_composite(
                 nested_uses,
                 findings,
                 visited,
+                depth + 1,
             )
 
 
@@ -172,11 +249,32 @@ def _reusable_workflow_uploads(root: Path, workflows: Iterable[str | Path] | Non
     visited: set[str] = set()
     visited_workflows: set[str] = set()
 
-    def inspect_call(workflow_name: str, job_name: str, uses: str, display_name: str) -> None:
+    def inspect_call(
+        workflow_name: str,
+        job_name: str,
+        uses: str,
+        display_name: str,
+        depth: int = 0,
+    ) -> None:
         normalized = uses.replace("\\", "/")
         if uses.startswith("./") and normalized.startswith("./.github/workflows/"):
             candidate = (root / uses).resolve()
             if str(candidate) in visited_workflows:
+                return
+            if depth >= MAX_REFERENCE_DEPTH or len(visited_workflows) >= MAX_LOCAL_WORKFLOWS:
+                findings.append(
+                    Finding(
+                        "local-workflow-inspection-limit",
+                        "high",
+                        "Local workflow inspection exceeded its depth or node budget; upload "
+                        "surface is unresolved.",
+                        workflow_name,
+                        job_name,
+                        display_name,
+                        uses,
+                        uses,
+                    )
+                )
                 return
             visited_workflows.add(str(candidate))
             if not _is_within(root, candidate) or not candidate.is_file():
@@ -184,7 +282,8 @@ def _reusable_workflow_uploads(root: Path, workflows: Iterable[str | Path] | Non
                     Finding(
                         "unresolved-local-workflow",
                         "high",
-                        "Local reusable workflow cannot be resolved safely; upload surface cannot be established.",
+                        "Local reusable workflow cannot be resolved safely; upload surface "
+                        "cannot be established.",
                         workflow_name,
                         job_name,
                         display_name,
@@ -200,7 +299,8 @@ def _reusable_workflow_uploads(root: Path, workflows: Iterable[str | Path] | Non
                     Finding(
                         "unresolved-local-workflow",
                         "high",
-                        "Local reusable workflow cannot be parsed safely; upload surface cannot be established.",
+                        "Local reusable workflow cannot be parsed safely; upload surface cannot "
+                        "be established.",
                         workflow_name,
                         job_name,
                         display_name,
@@ -219,7 +319,7 @@ def _reusable_workflow_uploads(root: Path, workflows: Iterable[str | Path] | Non
                 # inspect it with the same visited-set protection.
                 job_uses = str(nested_job.get("uses", "")).strip()
                 if job_uses and "/.github/workflows/" in job_uses.replace("\\", "/"):
-                    inspect_call(workflow_name, job_name, job_uses, str(nested_job_name))
+                    inspect_call(workflow_name, job_name, job_uses, str(nested_job_name), depth + 1)
                 nested_steps = nested_job.get("steps")
                 if not isinstance(nested_steps, list):
                     continue
@@ -233,7 +333,8 @@ def _reusable_workflow_uploads(root: Path, workflows: Iterable[str | Path] | Non
                             Finding(
                                 "local-reusable-workflow-artifact-upload",
                                 "high",
-                                "A local reusable workflow contains an artifact upload that the direct workflow scanner cannot enumerate; gate fails closed.",
+                                "A local reusable workflow contains an artifact upload that the "
+                                "direct workflow scanner cannot enumerate; gate fails closed.",
                                 workflow_name,
                                 job_name,
                                 display_name,
@@ -254,13 +355,15 @@ def _reusable_workflow_uploads(root: Path, workflows: Iterable[str | Path] | Non
                             visited,
                         )
                     elif "/.github/workflows/" in nested_uses.replace("\\", "/"):
-                        inspect_call(workflow_name, job_name, nested_uses, display_name)
+                        inspect_call(workflow_name, job_name, nested_uses, display_name, depth + 1)
         elif "/.github/workflows/" in normalized:
             findings.append(
                 Finding(
                     "reusable-workflow-upload-unknown",
                     "high",
-                    "Reusable workflow call cannot be statically inspected for artifact uploads; gate fails closed until its upload surface is reviewed separately.",
+                    "Reusable workflow call cannot be statically inspected for artifact "
+                    "uploads; gate fails closed until its upload surface is reviewed "
+                    "separately.",
                     workflow_name,
                     job_name,
                     display_name,
@@ -313,7 +416,8 @@ def fail_closed_findings(
                 Finding(
                     "unresolved-artifact-surface",
                     "high",
-                    "Artifact upload path is dynamic, so the upload set cannot be established; gate fails closed.",
+                    "Artifact upload path is dynamic, so the upload set cannot be established; "
+                    "gate fails closed.",
                     artifact.workflow,
                     artifact.job,
                     artifact.step,
