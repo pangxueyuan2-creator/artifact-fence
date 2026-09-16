@@ -44,6 +44,10 @@ artifact-fence scan . --workflow .github/workflows/release.yml
 
 `scan` 即使存在 findings 也返回 `0`，适合先观察和落盘审计证据。
 
+两种命令都会检查本地 composite action 和 reusable workflow 引用中的未解析上传面。缺少本地 `action.yml` / `action.yaml`、格式错误的 composite steps、元数据链接指向仓库外，都会报告 high finding；`check` 返回 `1`，`scan` 保持观察模式。元数据越界时不会读取目标文件内容。
+
+引用检查最多深入 32 层；每次 composite 检查遍历最多访问 256 个不同的本地 action，每次 reusable workflow 检查遍历最多访问 256 个不同的本地 workflow。达到上限会报告 `local-action-inspection-limit` 或 `local-workflow-inspection-limit`，不会把未完成的检查当成通过。该检查不会执行 action、JavaScript、Docker 或 shell，也不证明这些可执行代码不会上传文件。
+
 ### 在 CI 中门禁
 
 ```bash
