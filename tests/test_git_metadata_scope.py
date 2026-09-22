@@ -14,7 +14,10 @@ from artifact_fence.cli import main
 
 class GitMetadataScopeTests(unittest.TestCase):
     @contextlib.contextmanager
-    def project(self, patterns: str, *, git_file: bool = False, hidden: bool = True):
+    def project(
+        self, patterns: str, *, git_file: bool = False, hidden: bool = True,
+        git_name: str = ".git",
+    ):
         workspace = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory(prefix="git-metadata-test-", dir=workspace) as temporary:
             root = Path(temporary).resolve()
@@ -29,12 +32,13 @@ class GitMetadataScopeTests(unittest.TestCase):
                 + "".join(f"            {pattern}\n" for pattern in patterns.splitlines()),
                 encoding="utf-8",
             )
+            metadata = root / git_name
             if git_file:
-                (root / ".git").write_text("gitdir: fake-worktree-private-path", encoding="utf-8")
+                metadata.write_text("gitdir: fake-worktree-private-path", encoding="utf-8")
             else:
-                (root / ".git/nested").mkdir(parents=True)
+                (metadata / "nested").mkdir(parents=True)
                 for name in ("config", "nested/config.txt"):
-                    (root / ".git" / name).write_text(
+                    (metadata / name).write_text(
                         "API_TOKEN=fake-metadata-test-only", encoding="utf-8"
                     )
             (root / "build").mkdir()
@@ -42,11 +46,11 @@ class GitMetadataScopeTests(unittest.TestCase):
             original_scandir, original_open = os.scandir, Path.open
 
             def no_metadata_scandir(directory):
-                self.assertFalse(Path(directory).is_relative_to(root / ".git"))
+                self.assertFalse(Path(directory).is_relative_to(metadata))
                 return original_scandir(directory)
 
             def no_metadata_open(path, *args, **kwargs):
-                self.assertFalse(path.is_relative_to(root / ".git"))
+                self.assertFalse(path.is_relative_to(metadata))
                 return original_open(path, *args, **kwargs)
 
             with patch("os.scandir", side_effect=no_metadata_scandir), patch.object(
@@ -166,6 +170,28 @@ class GitMetadataScopeTests(unittest.TestCase):
             code, report = self.check(root, command="scan")
         self.assertEqual(0, code)
         self.assertIn("uninspected-git-metadata", {x["rule_id"] for x in report["findings"]})
+
+    @unittest.skipUnless(os.name == "nt", "Windows metadata case folding")
+    def test_windows_uppercase_git_directory_stays_opaque(self) -> None:
+        for patterns, expected in ((".git/config", 1), (".GIT/config", 1), ("build/**", 0)):
+            with self.subTest(patterns=patterns), self.project(patterns, git_name=".GIT") as root:
+                code, report = self.check(root)
+                self.assertEqual(expected, code)
+                if expected:
+                    self.assertIn(
+                        "uninspected-git-metadata", {x["rule_id"] for x in report["findings"]}
+                    )
+
+    @unittest.skipUnless(os.name == "nt", "Windows metadata case folding")
+    def test_windows_uppercase_git_file_stays_opaque(self) -> None:
+        for patterns, expected in (
+            (".git", 1), (".GIT", 1), (".git/config", 0), ("build/**", 0)
+        ):
+            with self.subTest(patterns=patterns), self.project(
+                patterns, git_name=".GIT", git_file=True
+            ) as root:
+                code, _ = self.check(root)
+                self.assertEqual(expected, code)
 
 
 if __name__ == "__main__":

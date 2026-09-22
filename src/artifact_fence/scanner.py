@@ -275,7 +275,8 @@ def _walk_files(root: Path) -> WalkResult:
                         return WalkResult(files, symlinks, True, git_metadata_kind)
                     path = Path(entry.path)
                     relative = _lexical_relative(root, path)
-                    if relative == ".git" or relative.startswith(".git/"):
+                    metadata_name = relative.casefold() if os.name == "nt" else relative
+                    if metadata_name == ".git" or metadata_name.startswith(".git/"):
                         # Keep Git metadata opaque, but do not silently turn a
                         # selected metadata scope into an empty, passing upload.
                         git_metadata_kind = "unknown"
