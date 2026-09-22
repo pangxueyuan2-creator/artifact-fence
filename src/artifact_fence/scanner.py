@@ -314,16 +314,48 @@ def _sensitive_literal_patterns(patterns: Iterable[str]) -> list[str]:
     return sensitive
 
 
-def _matches(relative: str, pattern: str) -> bool:
+def _matches(relative: str, pattern: str, *, can_be_directory: bool = False) -> bool:
+    """Match path segments and implicit directory descendants, as upload globs do.
+
+    A single wildcard never consumes a separator. A complete ``**`` segment can
+    consume zero or more segments. Matching an ancestor directory also selects
+    its descendants, including when the directory itself matched a wildcard.
+    """
+
     normalized = pattern.replace("\\", "/").strip()
-    while normalized.startswith("./"):
-        normalized = normalized[2:]
-    normalized = normalized.rstrip("/")
     if not normalized:
         return False
-    if not _has_glob(normalized):
-        return relative == normalized or relative.startswith(f"{normalized}/")
-    return fnmatchcase(relative, normalized)
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    if normalized in {"", "."}:
+        return bool(relative)
+    directory_only = normalized.endswith("/")
+    normalized = normalized.rstrip("/")
+    parts = relative.split("/")
+    segments = [part for part in normalized.split("/") if part]
+    if os.name == "nt":
+        parts = [part.lower() for part in parts]
+        segments = [segment.lower() for segment in segments]
+
+    # Track reachable path positions without recursive/backtracking globstar
+    # expansion. A match can end before the file at any ancestor directory.
+    positions = {0}
+    for segment in segments:
+        if segment == "**":
+            positions = set(range(min(positions), len(parts) + 1))
+        else:
+            # Minimatch accepts both [!a] and [^a] for a negated character set.
+            segment = segment.replace("[^", "[!")
+            positions = {
+                index + 1
+                for index in positions
+                if index < len(parts) and fnmatchcase(parts[index], segment)
+            }
+        if not positions:
+            return False
+    if directory_only and not can_be_directory:
+        return any(index < len(parts) for index in positions)
+    return bool(positions)
 
 
 def _match_files(
@@ -359,7 +391,9 @@ def _match_files(
             relative: target_inside
             for relative, target_inside in walk.symlinks
             if (include_hidden or not _is_hidden_relative(relative))
-            and _matches(relative, pattern)
+            # A skipped link may denote a directory. Preserve boundary findings
+            # for directory-only patterns without following or statting it.
+            and _matches(relative, pattern, can_be_directory=True)
         }
         if excluded:
             included.difference_update(matching_files)
