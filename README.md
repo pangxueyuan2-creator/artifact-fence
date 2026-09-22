@@ -90,6 +90,8 @@ artifact-fence check . --min-severity high
 
 Artifact Fence 支持 `actions/upload-artifact` 与 `actions/upload-pages-artifact`；多行 path 和 `!` 排除模式会按顺序解释，目录路径会递归展开。为了避免 action ref 或运行时表达式造成 hidden-file 漏报，**只有显式静态的 `include-hidden-files: false` 才会排除隐藏文件**；省略、动态、浮动或 Pages 情况都按“可能上传”枚举。`upload-pages-artifact` 省略 path 时使用 `_site/` 默认目录。绝对、UNC、Windows drive 或 `..` 越界路径会被拒绝为 high finding。
 
+路径匹配按目录层级处理：`*`、`?` 和 `[...]` 不跨越目录分隔符，独立的 `**` 可以匹配零层或多层目录；`.` 和 `./` 表示工作树根目录。通配符命中目录时也会包含其后代文件，排除模式采用相同规则；因此 `!build/*.txt` 不会排除 `build/nested/report.txt`。
+
 ## JSON API
 
 CLI 是稳定的 JSON 边界；同时提供一个小型 Python API：
