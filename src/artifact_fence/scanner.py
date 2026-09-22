@@ -7,6 +7,7 @@ from fnmatch import fnmatchcase
 import os
 from pathlib import Path
 import re
+import stat
 from typing import Any, Iterable
 
 import yaml
@@ -277,6 +278,13 @@ def _walk_files(root: Path) -> WalkResult:
                         continue
                     try:
                         is_link = entry.is_symlink()
+                        if not is_link and os.name == "nt":
+                            # Junctions are directories, not symlinks. Inspect the
+                            # reparse tag without following them (also on Python 3.11).
+                            is_link = (
+                                entry.stat(follow_symlinks=False).st_reparse_tag
+                                == stat.IO_REPARSE_TAG_MOUNT_POINT
+                            )
                         if is_link:
                             symlinks.append((relative, _is_within(root, path)))
                             continue

@@ -48,6 +48,8 @@ artifact-fence scan . --workflow .github/workflows/release.yml
 
 引用检查最多深入 32 层；每次 composite 检查遍历最多访问 256 个不同的本地 action，每次 reusable workflow 检查遍历最多访问 256 个不同的本地 workflow。达到上限会报告 `local-action-inspection-limit` 或 `local-workflow-inspection-limit`，不会把未完成的检查当成通过。该检查不会执行 action、JavaScript、Docker 或 shell，也不证明这些可执行代码不会上传文件。
 
+枚举制品文件时，Windows junction 与目录符号链接采用同样的策略：不遍历目标目录；选中的越界 junction 报告 `unsafe-artifact-path`，指向仓库内的 junction 报告 `artifact-symlink-skipped`。显式排除或被 `include-hidden-files: false` 排除的链接不会产生上传 finding。
+
 ### 在 CI 中门禁
 
 ```bash
