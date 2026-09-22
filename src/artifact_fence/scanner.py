@@ -140,6 +140,7 @@ class WalkResult:
     files: list[Path]
     symlinks: list[tuple[str, bool]]
     truncated: bool
+    git_metadata_kind: str | None = None
 
 
 def _relative(root: Path, path: Path) -> str | None:
@@ -263,6 +264,7 @@ def _walk_files(root: Path) -> WalkResult:
     symlinks: list[tuple[str, bool]] = []
     directories = [root]
     entries_seen = 0
+    git_metadata_kind: str | None = None
     while directories:
         directory = directories.pop()
         try:
@@ -270,10 +272,21 @@ def _walk_files(root: Path) -> WalkResult:
                 for entry in entries:
                     entries_seen += 1
                     if entries_seen > MAX_ENUMERATED_ENTRIES:
-                        return WalkResult(files, symlinks, True)
+                        return WalkResult(files, symlinks, True, git_metadata_kind)
                     path = Path(entry.path)
                     relative = _lexical_relative(root, path)
-                    if relative == ".git" or relative.startswith(".git/"):
+                    metadata_name = relative.casefold() if os.name == "nt" else relative
+                    if metadata_name == ".git" or metadata_name.startswith(".git/"):
+                        # Keep Git metadata opaque, but do not silently turn a
+                        # selected metadata scope into an empty, passing upload.
+                        git_metadata_kind = "unknown"
+                        try:
+                            if entry.is_file(follow_symlinks=False):
+                                git_metadata_kind = "file"
+                            elif entry.is_dir(follow_symlinks=False):
+                                git_metadata_kind = "directory"
+                        except OSError:
+                            pass
                         continue
                     try:
                         is_link = entry.is_symlink()
@@ -289,7 +302,7 @@ def _walk_files(root: Path) -> WalkResult:
                         continue
         except OSError:
             continue
-    return WalkResult(files, symlinks, False)
+    return WalkResult(files, symlinks, False, git_metadata_kind)
 
 
 def _has_glob(pattern: str) -> bool:
@@ -326,17 +339,155 @@ def _matches(relative: str, pattern: str) -> bool:
     return fnmatchcase(relative, normalized)
 
 
+def _metadata_pattern_matches(relative: str, pattern: str, *, directory: bool) -> bool:
+    """Prove that an exclusion covers one literal metadata scope.
+
+    Match segments here: whole-path fnmatch would let a narrow exclusion cross
+    directory separators and falsely declare an uninspected scope excluded.
+    """
+
+    parts = relative.split("/")
+    segments = [part for part in pattern.rstrip("/").split("/") if part]
+    positions = {0}
+    for segment in segments:
+        if segment == "**":
+            positions = set(range(min(positions), len(parts) + 1))
+        else:
+            positions = {
+                index + 1
+                for index in positions
+                if index < len(parts)
+                and fnmatchcase(parts[index], segment.replace("[^", "[!"))
+            }
+        if not positions:
+            return False
+    if pattern.endswith("/") and not directory:
+        return any(index < len(parts) for index in positions)
+    return bool(positions)
+
+
+def _metadata_search_root_visible(pattern: str) -> bool:
+    """An explicit non-hidden search root can bypass a hidden parent in glob.
+
+    For example, hidden-file exclusion skips a search rooted at .git, but a
+    search rooted directly at .git/config still selects that non-hidden file.
+    """
+
+    literals: list[str] = []
+    for segment in pattern.rstrip("/").split("/"):
+        literal = ""
+        index = 0
+        while index < len(segment):
+            character = segment[index]
+            if character in "*?":
+                break
+            if character == "[":
+                closing = segment.find("]", index + 1)
+                if closing > index + 2:
+                    break
+                if closing == index + 2:
+                    literal += segment[index + 1]
+                    index = closing + 1
+                    continue
+            literal += character
+            index += 1
+        if index < len(segment):
+            break
+        literals.append(literal)
+    return (
+        len(literals) > 1
+        and literals[0] == ".git"
+        and bool(literals[-1])
+        and not literals[-1].startswith(".")
+    )
+
+
+def _git_metadata_selected(
+    patterns: Iterable[str], *, is_file: bool, include_hidden: bool
+) -> bool:
+    """Conservatively track selected scopes without entering or reading .git.
+
+    Exact exclusions, exclusions covering a literal positive scope, and whole
+    metadata exclusions can prove the scope empty. Partial wildcard exclusions
+    otherwise leave an unresolved scope, rather than guessing unseen contents.
+    """
+
+    if is_file and not include_hidden:
+        return False
+    selected: set[str] = set()
+    for raw in patterns:
+        if "${{" in raw or "$(" in raw or "${" in raw:
+            continue
+        excluded = False
+        while raw.startswith("!"):
+            excluded = not excluded
+            raw = raw[1:].strip()
+        if _is_unsafe_pattern(raw):
+            continue
+        pattern = raw.replace("\\", "/").strip()
+        while pattern.startswith("./"):
+            pattern = pattern[2:]
+        if pattern == ".":
+            pattern = ""
+        trailing_separator = pattern.endswith("/")
+        pattern = "/".join(part for part in pattern.split("/") if part)
+        if pattern and trailing_separator:
+            pattern += "/"
+        if os.name == "nt":
+            pattern = pattern.lower()
+        first = pattern.split("/", 1)[0]
+        if excluded:
+            covers_all = _metadata_pattern_matches(".git", pattern, directory=not is_file)
+            # A directory's immediate children include every contained file or
+            # directory; the latter's descendants are implicit glob matches.
+            if not is_file and pattern.endswith("/*"):
+                covers_all |= _metadata_pattern_matches(".git", pattern[:-2], directory=True)
+            if covers_all:
+                selected.clear()
+            else:
+                selected = {
+                    scope
+                    for scope in selected
+                    if scope != pattern
+                    and (
+                        _has_glob(scope)
+                        or not _metadata_pattern_matches(
+                            scope.rstrip("/"), pattern, directory=scope.endswith("/")
+                        )
+                    )
+                }
+        else:
+            if not include_hidden and not _metadata_search_root_visible(pattern):
+                continue
+            if (
+                _metadata_pattern_matches(".git", pattern, directory=False)
+                if is_file
+                else not pattern or first == "**" or fnmatchcase(".git", first.replace("[^", "[!"))
+            ):
+                selected.add(pattern)
+    return bool(selected)
+
+
 def _match_files(
     root: Path, patterns: Iterable[str], include_hidden: bool
-) -> tuple[list[Path], list[str], bool, bool, bool, list[str]]:
+) -> tuple[list[Path], list[str], bool, bool, bool, list[str], bool]:
     """Resolve static patterns from one bounded walk.
 
     Returns files, dynamic patterns, selected outside-root links, truncation,
     selected in-root directory/file links skipped without traversal, and positive
-    static patterns that matched neither files nor links.
+    static patterns that matched neither files nor links, and selected opaque
+    Git metadata.
     """
 
     walk = _walk_files(root)
+    patterns = tuple(patterns)
+    selected_git_metadata = walk.git_metadata_kind is not None and any(
+        _git_metadata_selected(patterns, is_file=is_file, include_hidden=include_hidden)
+        for is_file in (
+            (True, False) if walk.git_metadata_kind == "unknown"
+            else (walk.git_metadata_kind == "file",)
+        )
+    )
     included: set[Path] = set()
     included_links: dict[str, bool] = {}
     dynamic: list[str] = []
@@ -348,7 +499,10 @@ def _match_files(
         excluded = raw.startswith("!")
         pattern = raw[1:].strip() if excluded else raw
         if _is_unsafe_pattern(pattern):
-            return sorted(included), dynamic, True, walk.truncated, False, unmatched
+            return (
+                sorted(included), dynamic, True, walk.truncated, False, unmatched,
+                selected_git_metadata,
+            )
         matching_files = {
             file_path
             for file_path in walk.files
@@ -371,10 +525,16 @@ def _match_files(
             if not matching_files and not matching_links:
                 unmatched.append(raw)
         if len(included) > MAX_FILES_PER_ARTIFACT:
-            return sorted(included)[:MAX_FILES_PER_ARTIFACT], dynamic, False, True, False, unmatched
+            return (
+                sorted(included)[:MAX_FILES_PER_ARTIFACT], dynamic, False, True, False,
+                unmatched, selected_git_metadata,
+            )
     outside_link = any(not target_inside for target_inside in included_links.values())
     skipped_link = any(target_inside for target_inside in included_links.values())
-    return sorted(included), dynamic, outside_link, walk.truncated, skipped_link, unmatched
+    return (
+        sorted(included), dynamic, outside_link, walk.truncated, skipped_link, unmatched,
+        selected_git_metadata,
+    )
 
 
 def _file_findings(
@@ -472,12 +632,26 @@ def _scan_workflow(root: Path, workflow_path: Path) -> tuple[list[Artifact], lis
                 include_hidden_files=include_hidden,
                 hidden_file_mode=hidden_mode,
             )
-            files, dynamic, unsafe, truncated, skipped_link, unmatched = _match_files(
+            files, dynamic, unsafe, truncated, skipped_link, unmatched, git_metadata = _match_files(
                 root, patterns, include_hidden
             )
             artifact.files = [_relative(root, file_path) for file_path in files if _relative(root, file_path)]
             artifact.dynamic_patterns = dynamic
             artifacts.append(artifact)
+            if git_metadata:
+                findings.append(
+                    Finding(
+                        "uninspected-git-metadata",
+                        "high",
+                        "Artifact paths may select Git metadata that is deliberately not inspected; "
+                        "exclude .git entirely or choose an upload scope outside it.",
+                        workflow_name,
+                        str(job_name),
+                        step,
+                        artifact.name,
+                        ".git",
+                    )
+                )
             if unsafe:
                 findings.append(
                     Finding(
@@ -555,7 +729,7 @@ def _scan_workflow(root: Path, workflow_path: Path) -> tuple[list[Artifact], lis
                             pattern,
                         )
                     )
-            if not files and not dynamic and not unsafe and not truncated:
+            if not files and not dynamic and not unsafe and not truncated and not git_metadata:
                 sensitive_patterns = _sensitive_literal_patterns(patterns)
                 if sensitive_patterns:
                     findings.append(

@@ -85,10 +85,13 @@ artifact-fence check . --min-severity high
 | `artifact-path-not-present` | info | 当前工作树没有匹配的**非隐藏**文件，可能由 CI 执行时生成。 |
 | `artifact-file-too-large` | info | 为限制资源消耗，只检查大文件的前 1 MiB；报告不保证覆盖其余内容。 |
 | `artifact-enumeration-truncated` | high | 工作树枚举超过安全上限，报告不完整；`check` fail-closed。 |
+| `uninspected-git-metadata` | high | 上传范围可能包含未检查的根目录 `.git` 元数据；`check` fail-closed。 |
 | `artifact-symlink-skipped` | info | 选中了指向仓库内的符号链接，但为避免链接语义不确定性未遍历其目标。 |
 | `dynamic-include-hidden-files` | medium | `include-hidden-files` 为动态表达式；静态枚举会保守地**包含**隐藏文件，避免漏报。 |
 
 Artifact Fence 支持 `actions/upload-artifact` 与 `actions/upload-pages-artifact`；多行 path 和 `!` 排除模式会按顺序解释，目录路径会递归展开。为了避免 action ref 或运行时表达式造成 hidden-file 漏报，**只有显式静态的 `include-hidden-files: false` 才会排除隐藏文件**；省略、动态、浮动或 Pages 情况都按“可能上传”枚举。`upload-pages-artifact` 省略 path 时使用 `_site/` 默认目录。绝对、UNC、Windows drive 或 `..` 越界路径会被拒绝为 high finding。
+
+根目录 `.git` 不会被遍历或读取，包括 worktree 的 `.git` 文件。普通 `build/**` 上传不受影响；若静态路径可能选择现存的 Git 元数据，会报告 `uninspected-git-metadata`。可以通过 `!.git` 完整排除它。`include-hidden-files: false` 会排除宽泛扫描中的 `.git`，但显式 `.git/config` 等路径可能直接以非隐藏子路径为搜索起点，仍会报告 high。相同范围或覆盖字面路径的排除可以消除该 finding；不能证明已排除全部可能文件的局部通配符排除仍保留 high，报告不会猜测未检查的元数据内容。
 
 ## JSON API
 
